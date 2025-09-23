@@ -92,14 +92,22 @@ func (dt *DependencyTracer) ParseRequirements(filename string) ([]string, error)
 	return packages, nil
 }
 
-// FetchPackageInfo fetches package information from PyPI with retry logic
-func (dt *DependencyTracer) FetchPackageInfo(ctx context.Context, packageName string) (*PyPIPackageInfo, error) {
+func (dt *DependencyTracer) FetchPackageInfoFast(packageName string) *PyPIPackageInfo {
 	// Check cache first
 	if cached, ok := dt.packageCache.Load(packageName); ok {
+		return cached.(*PyPIPackageInfo)
+	}
+	return nil
+}
+
+// FetchPackageInfo fetches package information from PyPI with retry logic
+func (dt *DependencyTracer) FetchPackageInfo(ctx context.Context, packageName string) (*PyPIPackageInfo, error) {
+	fastResult := dt.FetchPackageInfoFast(packageName)
+	if fastResult != nil {
 		if dt.verbose {
-			color.New(color.Faint).Printf("📦 Using cached data for %s\n", packageName)
+			color.New(color.Faint).Printf("📦 Using fast (cached) dep data for %s\n", packageName)
 		}
-		return cached.(*PyPIPackageInfo), nil
+		return fastResult, nil
 	}
 
 	// Otherwise fetch from PyPI as before

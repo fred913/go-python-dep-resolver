@@ -56,21 +56,26 @@ var traceCmd = &cobra.Command{
 
 		tracer := NewDependencyTracer(maxConcurrent, verbose, includeOptional)
 
-		// If .pypi-tracer.cache exists, importCacheJson from it
-		if _, err := os.Stat(".pypi-tracer.cache"); err == nil {
-			color.Blue("📂 Loading local cache from.pypi-tracer.cache file")
-			err := tracer.ImportCacheJson(".pypi-tracer.cache")
-			if err != nil {
-				return err
+		cacheFilePath, err := GetCacheFilePath()
+		if err != nil {
+			color.Yellow("⚠️ Seems like user-wide cache creation has failed, pypi-tracer without local cache is slow. Use with caution.")
+		} else {
+			defer func() {
+				// Export cache to .pypi-tracer.cache file
+				tracer.ExportCacheJson(cacheFilePath)
+			}()
+			
+			// If .pypi-tracer.cache exists, importCacheJson from it
+			if _, err := os.Stat(cacheFilePath); err == nil {
+				color.Blue("📂 Loading local cache from .pypi-tracer.cache file")
+				err := tracer.ImportCacheJson(cacheFilePath)
+				if err != nil {
+					color.Yellow("❌ .pypi-tracer.cache exists, but it doesn't seem to be a valid cache file")
+				} else {
+					color.Green("✅ Loaded %d cached packages from .pypi-tracer.cache", CountSyncMap(&tracer.packageCache))
+				}
 			}
-
-			color.Green("✅ Loaded %d cached packages from.pypi-tracer.cache", CountSyncMap(&tracer.packageCache))
 		}
-
-		defer func() {
-			// Export cache to .pypi-tracer.cache file
-			tracer.ExportCacheJson(".pypi-tracer.cache")
-		}()
 
 		if uvLockFile != "" {
 			color.Blue("📂 Loading local cache from uv.lock file %s", uvLockFile)
