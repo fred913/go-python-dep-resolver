@@ -31,3 +31,15 @@ type CachePackage struct {
 	Dependencies     []Dependency            `json:"dependencies"`
 	DependencyGroups map[string][]Dependency `json:"dependency_groups"`
 }
+
+func (cp *CachePackage) DependencyGraphItem() DependencyGraphItem {
+	return DependencyGraphItem{
+		Dependencies:     cp.Dependencies,
+		DependencyGroups: cp.DependencyGroups,
+	}
+}
+
+type DependencyGraphItem struct {
+	Dependencies     []Dependency
+	DependencyGroups map[string][]Dependency
+}

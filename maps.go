@@ -11,6 +11,14 @@ func CountSyncMap(m *sync.Map) int {
 	return count
 }
 
+func CountDependencyGroupPackages(m map[string][]Dependency) int {
+	count := 0
+	for _, group := range m {
+		count += len(group)
+	}
+	return count
+}
+
 // Thread-safe visited map wrapper
 type visitedMap struct {
 	mu sync.RWMutex
@@ -37,4 +45,42 @@ func (vm *visitedMap) setVisited(key string) bool {
 	}
 	vm.m[key] = true
 	return false // newly visited
+}
+
+// TypedSyncMap wraps sync.Map with type safety
+type TypedSyncMap[K comparable, V any] struct {
+	m sync.Map
+}
+
+func NewTypedSyncMap[K comparable, V any]() *TypedSyncMap[K, V] {
+	return &TypedSyncMap[K, V]{}
+}
+
+func (tsm *TypedSyncMap[K, V]) Store(key K, value V) {
+	tsm.m.Store(key, value)
+}
+
+func (tsm *TypedSyncMap[K, V]) Load(key K) (V, bool) {
+	if val, ok := tsm.m.Load(key); ok {
+		return val.(V), true
+	}
+	var zero V
+	return zero, false
+}
+
+func (tsm *TypedSyncMap[K, V]) LoadOrStore(key K, value V) (V, bool) {
+	if val, loaded := tsm.m.LoadOrStore(key, value); loaded {
+		return val.(V), true
+	}
+	return value, false
+}
+
+func (tsm *TypedSyncMap[K, V]) Delete(key K) {
+	tsm.m.Delete(key)
+}
+
+func (tsm *TypedSyncMap[K, V]) Range(f func(key K, value V) bool) {
+	tsm.m.Range(func(key, value interface{}) bool {
+		return f(key.(K), value.(V))
+	})
 }

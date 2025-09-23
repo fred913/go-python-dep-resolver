@@ -48,9 +48,6 @@ var traceCmd = &cobra.Command{
 		if verbose {
 			color.Blue("   🔧 Verbose mode: enabled")
 		}
-		if verbose {
-			color.Blue("   🔧 Including optional dependencies: enabled")
-		}
 		fmt.Println()
 
 		tracer := NewDependencyTracer(maxConcurrent, verbose)

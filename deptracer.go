@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"net/http"
 	"os"
-	"regexp"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -21,9 +20,10 @@ import (
 type DependencyTracer struct {
 	client          *http.Client
 	packageCache    sync.Map
-	dependencyGraph sync.Map
+	dependencyGraph sync.Map // map[string]DependencyGraphItem
 	maxConcurrent   int64
 	verbose         bool
+	reqDecoder      *RequirementsDecoder
 }
 
 // NewDependencyTracer creates a new tracer instance
@@ -40,6 +40,7 @@ func NewDependencyTracer(maxConcurrent int64, verbose bool) *DependencyTracer {
 		},
 		maxConcurrent: maxConcurrent,
 		verbose:       verbose,
+		reqDecoder:    NewRequirementsDecoder(false),
 	}
 }
 
@@ -55,56 +56,28 @@ func (dt *DependencyTracer) ParseRequirements(filename string) ([]Dependency, ma
 	}
 	defer file.Close()
 
-	var packages []Dependency
+	var dependencies []Dependency
 	dependencyGroups := make(map[string][]Dependency)
-	packageRegex := regexp.MustCompile(`^([a-zA-Z0-9_-]+)(?:\[([a-zA-Z0-9_,-]+)\])?`)
+
 	scanner := bufio.NewScanner(file)
-	lineNum := 0
 
 	for scanner.Scan() {
-		lineNum++
 		line := strings.TrimSpace(scanner.Text())
 
-		if line == "" || strings.HasPrefix(line, "#") {
-			if dt.verbose && strings.HasPrefix(line, "#") {
-				color.New(color.Faint).Printf("  Line %d: Skipping comment\n", lineNum)
-			}
-			continue
-		}
-
-		matches := packageRegex.FindStringSubmatch(line)
-		if len(matches) > 1 {
-			packageName := strings.ToLower(matches[1])
-			var extras []string
-			if len(matches) > 2 && matches[2] != "" {
-				// Parse extras like "security,dev,test"
-				extrasStr := matches[2]
-				for _, extra := range strings.Split(extrasStr, ",") {
-					extras = append(extras, strings.TrimSpace(extra))
+		matches := dt.reqDecoder.DecodeRequirementsLine(line)
+		for _, match := range matches {
+			if match.IncludedInExtra == nil {
+				dep := Dependency{
+					Name:   match.Name,
+					Extras: match.TargetExtra,
 				}
+				dependencies = append(dependencies, dep)
+			} else {
+				dependencyGroups[*match.IncludedInExtra] = append(dependencyGroups[*match.IncludedInExtra], Dependency{
+					Name:   match.Name,
+					Extras: match.TargetExtra,
+				})
 			}
-
-			dep := Dependency{
-				Name:   packageName,
-				Extras: extras,
-			}
-			packages = append(packages, dep)
-
-			// Organize by groups - main group and each extra
-			dependencyGroups["main"] = append(dependencyGroups["main"], dep)
-			for _, extra := range extras {
-				dependencyGroups[extra] = append(dependencyGroups[extra], dep)
-			}
-
-			if dt.verbose {
-				if len(extras) > 0 {
-					color.Green("  Line %d: Found package '%s' with extras %v from '%s'", lineNum, packageName, extras, line)
-				} else {
-					color.Green("  Line %d: Found package '%s' from '%s'", lineNum, packageName, line)
-				}
-			}
-		} else if dt.verbose {
-			color.Yellow("  Line %d: Could not parse package from '%s'", lineNum, line)
 		}
 	}
 
@@ -112,7 +85,7 @@ func (dt *DependencyTracer) ParseRequirements(filename string) ([]Dependency, ma
 		return nil, nil, fmt.Errorf("error reading requirements file: %w", err)
 	}
 
-	return packages, dependencyGroups, nil
+	return dependencies, dependencyGroups, nil
 }
 
 func (dt *DependencyTracer) FetchPackageInfoFast(packageName string) *PyPIPackageInfo {
@@ -179,9 +152,11 @@ func (dt *DependencyTracer) FetchPackageInfo(ctx context.Context, packageName st
 			dt.packageCache.Store(packageName, &packageInfo)
 
 			if dt.verbose {
-				depCount := len(dt.ExtractDependencies(&packageInfo, nil))
-				color.Green("  ✅ Successfully fetched %s (v%s) with %d dependencies",
-					packageInfo.Info.Name, packageInfo.Info.Version, depCount)
+				deps, dGrps := dt.ExtractDependencies(&packageInfo)
+				depCount := len(deps)
+				oDepCount := CountDependencyGroupPackages(dGrps)
+				color.Green("  ✅ Successfully fetched %s (v%s) with %d+%d dependencies",
+					packageInfo.Info.Name, packageInfo.Info.Version, depCount, oDepCount)
 			}
 
 			return &packageInfo, nil
@@ -211,74 +186,39 @@ func (dt *DependencyTracer) FetchPackageInfo(ctx context.Context, packageName st
 }
 
 // ExtractDependencies extracts dependency names from package info and builds Dependency objects
-func (dt *DependencyTracer) ExtractDependencies(packageInfo *PyPIPackageInfo, requestedExtras []string) []Dependency {
-	var dependencies []Dependency
-	dependencyRegex := regexp.MustCompile(`^([a-zA-Z0-9_-]+)`)
-
-	for _, reqDist := range packageInfo.Info.RequiresDist {
-		// Parse extra conditions from requires_dist like "requests ; extra == 'security'"
-		var depExtras []string
-		includesDep := true
-
-		if strings.Contains(reqDist, ";") {
-			parts := strings.Split(reqDist, ";")
-			reqDist = strings.TrimSpace(parts[0]) // Get the dependency name part
-			condition := strings.TrimSpace(parts[1])
-
-			if strings.Contains(condition, "extra") {
-				// Parse extra condition like "extra == 'security'" or "extra in ['dev', 'test']"
-				if strings.Contains(condition, "extra ==") {
-					// Single extra: extra == 'security'
-					extraMatch := regexp.MustCompile(`extra\s*==\s*['"']([^'"]+)['"']`)
-					if match := extraMatch.FindStringSubmatch(condition); len(match) > 1 {
-						depExtras = []string{strings.TrimSpace(match[1])}
-					}
-				}
-
-				// If we're not including optional deps and this has extras, skip unless requested
-				if len(requestedExtras) > 0 {
-					// Check if any of the dependency's extras are in the requested extras
-					includesDep = false
-					for _, reqExtra := range requestedExtras {
-						for _, depExtra := range depExtras {
-							if reqExtra == depExtra {
-								includesDep = true
-								break
-							}
-						}
-						if includesDep {
-							break
-						}
-					}
-				}
-
-				if dt.verbose && !includesDep {
-					color.New(color.Faint).Printf("    Skipping conditional dependency: %s\n", reqDist)
-				}
-			}
-		}
-
-		if includesDep {
-			matches := dependencyRegex.FindStringSubmatch(reqDist)
-			if len(matches) > 1 {
-				depName := strings.ToLower(matches[1])
+func (dt *DependencyTracer) ExtractDependencies(packageInfo *PyPIPackageInfo) ([]Dependency, map[string][]Dependency) {
+	dependencies := make([]Dependency, 0)
+	dependencyGroups := make(map[string][]Dependency)
+	for _, req := range packageInfo.Info.RequiresDist {
+		matches := dt.reqDecoder.DecodeRequiresDistLine(req)
+		for _, match := range matches {
+			if match.IncludedInExtra == nil {
 				dep := Dependency{
-					Name:   depName,
-					Extras: depExtras,
+					Name:   match.Name,
+					Extras: match.TargetExtra,
 				}
 				dependencies = append(dependencies, dep)
-				if dt.verbose {
-					if len(depExtras) > 0 {
-						color.New(color.Faint).Printf("    Found dependency: %s with extras %v (from %s)\n", depName, depExtras, reqDist)
-					} else {
-						color.New(color.Faint).Printf("    Found dependency: %s (from %s)\n", depName, reqDist)
-					}
-				}
+			} else {
+				dependencyGroups[*match.IncludedInExtra] = append(dependencyGroups[*match.IncludedInExtra], Dependency{
+					Name:   match.Name,
+					Extras: match.TargetExtra,
+				})
 			}
 		}
 	}
+	return dependencies, dependencyGroups
+}
 
-	return dependencies
+// Helper function to check if any dependency extra matches requested extras
+func hasAnyOverlap(arrA, arrB []string) bool {
+	for _, depExtra := range arrA {
+		for _, reqExtra := range arrB {
+			if depExtra == reqExtra {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // BuildDependencyGraph builds the dependency graph recursively with progress tracking
@@ -325,8 +265,11 @@ func (dt *DependencyTracer) BuildDependencyGraph(ctx context.Context, rootPackag
 			bar.Add(1)
 
 			if err == nil {
-				deps := dt.ExtractDependencies(packageInfo, pkg.dependency.Extras)
-				dt.dependencyGraph.Store(pkg.dependency.Name, deps)
+				deps, groupedDeps := dt.ExtractDependencies(packageInfo)
+				dt.dependencyGraph.Store(packageInfo.Info.Name, DependencyGraphItem{
+					deps,
+					groupedDeps,
+				})
 				for _, dep := range deps {
 					if !visited.isVisited(dep.Name) {
 						producers.Add(1)
@@ -455,9 +398,7 @@ func (dt *DependencyTracer) dfs(current Dependency, target string, path []string
 	defer func() { visited[current.Stringify()] = false }()
 
 	var allPaths [][]string
-	if deps, ok := dt.dependencyGraph.Load(current.Name); ok {
-		dependencies := deps.([]Dependency)
-
+	if dependencies, err := dt.composeDeps(current); err == nil {
 		// Group by child name
 		grouped := make(map[string]Dependency)
 		for _, dep := range dependencies {
@@ -472,6 +413,29 @@ func (dt *DependencyTracer) dfs(current Dependency, target string, path []string
 	}
 
 	return allPaths
+}
+
+func (dt *DependencyTracer) composeDeps(current Dependency) ([]Dependency, error) {
+	dgItemRaw, ok := dt.dependencyGraph.Load(current.Name)
+	if !ok {
+		return nil, fmt.Errorf("package %s not found in dependency graph", current.Name)
+	}
+	dgItem := dgItemRaw.(DependencyGraphItem)
+	dependencies := make([]Dependency, 0)
+	dependencies = append(dependencies, dgItem.Dependencies...)
+	for _, groupExtraLabel := range current.Extras {
+		group, ok := dgItem.DependencyGroups[groupExtraLabel]
+		if !ok {
+			return nil, fmt.Errorf("package %s doesn't have group %s, but we're asserting its existance", current.Name, groupExtraLabel)
+		}
+
+		for _, dep := range group {
+			if hasAnyOverlap(dep.Extras, current.Extras) {
+				dependencies = append(dependencies, dep)
+			}
+		}
+	}
+	return dependencies, nil
 }
 
 // DisplayDependencyTree displays the dependency paths
@@ -508,24 +472,7 @@ func (dt *DependencyTracer) ExportCacheJson(path string) error {
 		pi := value.(*PyPIPackageInfo)
 
 		// Use ExtractDependencies so we store clean names
-		deps := dt.ExtractDependencies(pi, nil) // Export all dependencies, no filtering
-
-		// Build dependency groups based on extras found in dependencies
-		dependencyGroups := make(map[string][]Dependency)
-		dependencyGroups["main"] = []Dependency{}
-
-		for _, dep := range deps {
-			// Add to main group
-			dependencyGroups["main"] = append(dependencyGroups["main"], dep)
-
-			// Add to specific extra groups if the dependency has extras
-			for _, extra := range dep.Extras {
-				if dependencyGroups[extra] == nil {
-					dependencyGroups[extra] = []Dependency{}
-				}
-				dependencyGroups[extra] = append(dependencyGroups[extra], dep)
-			}
-		}
+		deps, dependencyGroups := dt.ExtractDependencies(pi)
 
 		data = append(data, CachePackage{
 			Name:             name,
@@ -582,17 +529,7 @@ func (dt *DependencyTracer) ImportCacheJson(path string) error {
 		pi.Info.RequiresDist = requiresDist
 
 		dt.packageCache.Store(pkg.Name, pi)
-		dt.dependencyGraph.Store(pkg.Name, pkg.Dependencies)
-
-		// Store dependency groups if available
-		if pkg.DependencyGroups != nil && len(pkg.DependencyGroups) > 0 {
-			// Note: Dependency groups are package-level metadata from requirements parsing
-			// For cached packages, we preserve the dependency structure but groups are
-			// primarily relevant for root packages from requirements.txt parsing
-			if dt.verbose {
-				color.New(color.Faint).Printf("    Restored dependency groups for %s: %v\n", pkg.Name, getGroupNames(pkg.DependencyGroups))
-			}
-		}
+		dt.dependencyGraph.Store(pkg.Name, pkg.DependencyGraphItem())
 	}
 
 	if dt.verbose {
@@ -601,16 +538,7 @@ func (dt *DependencyTracer) ImportCacheJson(path string) error {
 	return nil
 }
 
-// getGroupNames returns the keys of a dependency groups map for logging purposes
-func getGroupNames(groups map[string][]Dependency) []string {
-	var names []string
-	for name := range groups {
-		names = append(names, name)
-	}
-	return names
-}
-
-func (dt *DependencyTracer) ImportCache(cache map[string][]Dependency) {
+func (dt *DependencyTracer) ImportCache(cache map[string]DependencyGraphItem) {
 	for name, deps := range cache {
 		pi := &PyPIPackageInfo{}
 		pi.Info.Name = name
@@ -618,17 +546,31 @@ func (dt *DependencyTracer) ImportCache(cache map[string][]Dependency) {
 
 		// Convert Dependencies back to requires_dist format
 		var requiresDist []string
-		for _, dep := range deps {
+		for _, dep := range deps.Dependencies {
 			reqDist := dep.Name
 			if len(dep.Extras) > 0 {
-				reqDist += " ; extra == '" + strings.Join(dep.Extras, "' or extra == '") + "'"
+				reqDist += "[" + strings.Join(dep.Extras, ",") + "]"
 			}
 			requiresDist = append(requiresDist, reqDist)
+		}
+		for groupName, group := range deps.DependencyGroups {
+			for _, dep := range group {
+				reqDist := dep.Name
+				if len(dep.Extras) > 0 {
+					reqDist += "[" + strings.Join(dep.Extras, ",") + "]"
+				}
+				reqDist += " ; extra == '" + groupName + "'"
+				requiresDist = append(requiresDist, reqDist)
+			}
 		}
 		pi.Info.RequiresDist = requiresDist
 
 		dt.packageCache.Store(name, pi)
-		dt.dependencyGraph.Store(name, deps)
+		deps, depGrps := dt.ExtractDependencies(pi)
+		dt.dependencyGraph.Store(pi.Info.Name, DependencyGraphItem{
+			deps,
+			depGrps,
+		})
 	}
 
 	if dt.verbose {
