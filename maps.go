@@ -2,6 +2,15 @@ package main
 
 import "sync"
 
+func CountSyncMap(m *sync.Map) int {
+	count := 0
+	m.Range(func(_, _ any) bool {
+		count++
+		return true
+	})
+	return count
+}
+
 // Thread-safe visited map wrapper
 type visitedMap struct {
 	mu sync.RWMutex

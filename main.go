@@ -28,7 +28,7 @@ var traceCmd = &cobra.Command{
 		maxDepth, _ := cmd.Flags().GetInt("max-depth")
 		maxConcurrent, _ := cmd.Flags().GetInt64("concurrency")
 		verbose, _ := cmd.Flags().GetBool("verbose")
-		cacheFile, _ := cmd.Flags().GetString("cache")
+		uvLockFile, _ := cmd.Flags().GetString("uv-lock")
 		includeOptional, _ := cmd.Flags().GetBool("include-optional")
 
 		if pattern == "" {
@@ -56,36 +56,34 @@ var traceCmd = &cobra.Command{
 
 		tracer := NewDependencyTracer(maxConcurrent, verbose, includeOptional)
 
-		if cacheFile != "" {
-			color.Blue("📂 Loading local cache from %s", cacheFile)
-			localCache, err := ParseUvLock(cacheFile)
+		// If .pypi-tracer.cache exists, importCacheJson from it
+		if _, err := os.Stat(".pypi-tracer.cache"); err == nil {
+			color.Blue("📂 Loading local cache from.pypi-tracer.cache file")
+			err := tracer.ImportCacheJson(".pypi-tracer.cache")
 			if err != nil {
 				return err
 			}
-			// tracer.localCache = localCache
-			// Apply them to packageCache
 
-			// Check uv.lock local cache
-			// if deps, ok := dt.localCache[packageName]; ok {
-			// 	pi := &PyPIPackageInfo{}
-			// 	pi.Info.Name = packageName
-			// 	pi.Info.Version = "cached"
-			// 	pi.Info.RequiresDist = nil // optional
-			// 	dt.packageCache.Store(packageName, pi)
-			// 	return pi, nil
-			// }
-			for packageName, deps := range localCache {
-				pi := &PyPIPackageInfo{}
-				pi.Info.Name = packageName
-				pi.Info.Version = "cached"
-				pi.Info.RequiresDist = deps
-				tracer.packageCache.Store(packageName, pi)
+			color.Green("✅ Loaded %d cached packages from.pypi-tracer.cache", CountSyncMap(&tracer.packageCache))
+		}
+
+		defer func() {
+			// Export cache to .pypi-tracer.cache file
+			tracer.ExportCacheJson(".pypi-tracer.cache")
+		}()
+
+		if uvLockFile != "" {
+			color.Blue("📂 Loading local cache from uv.lock file %s", uvLockFile)
+			localCache, err := ParseUvLock(uvLockFile)
+			if err != nil {
+				return err
 			}
 
+			// Import uv.lock local cache
+			tracer.ImportCache(localCache)
 			color.Green("✅ Loaded %d cached packages from uv.lock", len(localCache))
-		} else {
-			color.Yellow("⚠️ No local cache file provided, fetching all packages might be a bit slow")
 		}
+
 		ctx := context.Background()
 
 		// Parse requirements.txt
@@ -140,7 +138,7 @@ func init() {
 	traceCmd.Flags().IntP("max-depth", "d", 3, "Maximum depth for dependency resolution")
 	traceCmd.Flags().Int64P("concurrency", "c", 128, "Maximum concurrent requests")
 	traceCmd.Flags().BoolP("verbose", "v", false, "Enable verbose logging")
-	traceCmd.Flags().String("cache", "", "Path to uv.lock TOML cache file")
+	traceCmd.Flags().String("uv-lock", "", "Path to uv.lock TOML cache file")
 	traceCmd.Flags().Bool("include-optional", false, "Include optional dependencies in the graph")
 
 	rootCmd.AddCommand(traceCmd)

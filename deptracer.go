@@ -406,3 +406,80 @@ func (dt *DependencyTracer) DisplayDependencyTree(paths [][]string, target strin
 		fmt.Println()
 	}
 }
+
+func (dt *DependencyTracer) ExportCacheJson(path string) error {
+	var data []CachePackage
+
+	dt.packageCache.Range(func(key, value interface{}) bool {
+		name := key.(string)
+		pi := value.(*PyPIPackageInfo)
+
+		// Use ExtractDependencies so we store clean names
+		deps := dt.ExtractDependencies(pi)
+
+		data = append(data, CachePackage{
+			Name:         name,
+			Version:      pi.Info.Version,
+			Dependencies: deps,
+		})
+		return true
+	})
+
+	file, err := os.Create(path)
+	if err != nil {
+		return fmt.Errorf("failed to create cache file: %w", err)
+	}
+	defer file.Close()
+
+	enc := json.NewEncoder(file)
+	enc.SetIndent("", "  ")
+	if err := enc.Encode(data); err != nil {
+		return fmt.Errorf("failed to write cache file: %w", err)
+	}
+
+	if dt.verbose {
+		color.Green("💾 Exported %d packages to cache file %s", len(data), path)
+	}
+	return nil
+}
+
+func (dt *DependencyTracer) ImportCacheJson(path string) error {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return fmt.Errorf("failed to read cache file: %w", err)
+	}
+
+	var pkgs []CachePackage
+	if err := json.Unmarshal(data, &pkgs); err != nil {
+		return fmt.Errorf("failed to parse cache file: %w", err)
+	}
+
+	for _, pkg := range pkgs {
+		pi := &PyPIPackageInfo{}
+		pi.Info.Name = pkg.Name
+		pi.Info.Version = pkg.Version
+		pi.Info.RequiresDist = pkg.Dependencies
+		dt.packageCache.Store(pkg.Name, pi)
+		dt.dependencyGraph.Store(pkg.Name, pkg.Dependencies)
+	}
+
+	if dt.verbose {
+		color.Green("📥 Imported %d packages from cache file %s", len(pkgs), path)
+	}
+	return nil
+}
+
+func (dt *DependencyTracer) ImportCache(cache map[string][]string) {
+	for name, deps := range cache {
+		pi := &PyPIPackageInfo{}
+		pi.Info.Name = name
+		pi.Info.Version = "inmem"
+		pi.Info.RequiresDist = deps
+		dt.packageCache.Store(name, pi)
+		dt.dependencyGraph.Store(name, deps)
+	}
+
+	if dt.verbose {
+		color.Green("📥 Imported %d packages into in-memory cache", len(cache))
+	}
+}
