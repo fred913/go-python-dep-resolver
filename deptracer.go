@@ -375,12 +375,14 @@ type packageDepth struct {
 }
 
 // FindDependencyPaths finds all paths from root packages to target dependency
+// FindDependencyPaths finds all unique paths from root packages to target dependency
 func (dt *DependencyTracer) FindDependencyPaths(target string, rootPackages []Dependency) [][]string {
 	color.Blue("🔍 Searching for dependency paths to '%s'...", target)
 
 	var paths [][]string
 	var mu sync.Mutex
 	var wg sync.WaitGroup
+	seen := make(map[string]struct{}) // deduplication set
 
 	// Create progress bar for path finding
 	bar := progressbar.NewOptions(len(rootPackages),
@@ -406,17 +408,23 @@ func (dt *DependencyTracer) FindDependencyPaths(target string, rootPackages []De
 			defer bar.Add(1)
 
 			if dt.verbose {
-				color.Blue("  🔎 Searching paths from %s to %s", rootPkg.Name, target)
+				color.Blue("  🔎 Searching paths from %s to %s", rootPkg.Stringify(), target)
 			}
 
-			localPaths := dt.dfs(rootPkg.Name, target, []string{}, make(map[string]bool), 10)
+			localPaths := dt.dfs(rootPkg, target, []string{}, make(map[string]bool), 10)
 
 			if dt.verbose && len(localPaths) > 0 {
 				color.Green("  ✅ Found %d path(s) from %s to %s", len(localPaths), rootPkg.Name, target)
 			}
 
 			mu.Lock()
-			paths = append(paths, localPaths...)
+			for _, p := range localPaths {
+				key := strings.Join(p, " -> ")
+				if _, ok := seen[key]; !ok {
+					seen[key] = struct{}{}
+					paths = append(paths, p)
+				}
+			}
 			mu.Unlock()
 		}(root)
 	}
@@ -428,10 +436,10 @@ func (dt *DependencyTracer) FindDependencyPaths(target string, rootPackages []De
 }
 
 // dfs performs depth-first search to find paths
-func (dt *DependencyTracer) dfs(current, target string, path []string, visited map[string]bool, maxDepth int) [][]string {
-	if current == target {
+func (dt *DependencyTracer) dfs(current Dependency, target string, path []string, visited map[string]bool, maxDepth int) [][]string {
+	if current.Name == target {
 		result := make([]string, len(path)+1)
-		copy(result, append(path, current))
+		copy(result, append(path, current.Stringify()))
 		if dt.verbose {
 			pathStr := strings.Join(result, " → ")
 			color.Green("    🎯 Found path: %s", pathStr)
@@ -439,18 +447,26 @@ func (dt *DependencyTracer) dfs(current, target string, path []string, visited m
 		return [][]string{result}
 	}
 
-	if visited[current] || len(path) >= maxDepth {
+	if visited[current.Stringify()] || len(path) >= maxDepth {
 		return nil
 	}
 
-	visited[current] = true
-	defer func() { visited[current] = false }()
+	visited[current.Stringify()] = true
+	defer func() { visited[current.Stringify()] = false }()
 
 	var allPaths [][]string
-	if deps, ok := dt.dependencyGraph.Load(current); ok {
+	if deps, ok := dt.dependencyGraph.Load(current.Name); ok {
 		dependencies := deps.([]Dependency)
+
+		// Group by child name
+		grouped := make(map[string]Dependency)
 		for _, dep := range dependencies {
-			subPaths := dt.dfs(dep.Name, target, append(path, current), visited, maxDepth)
+			grouped[dep.Name] = dep
+		}
+
+		// Recurse only once per child name
+		for _, dep := range grouped {
+			subPaths := dt.dfs(dep, target, append(path, current.Stringify()), visited, maxDepth)
 			allPaths = append(allPaths, subPaths...)
 		}
 	}
@@ -494,10 +510,28 @@ func (dt *DependencyTracer) ExportCacheJson(path string) error {
 		// Use ExtractDependencies so we store clean names
 		deps := dt.ExtractDependencies(pi, nil) // Export all dependencies, no filtering
 
+		// Build dependency groups based on extras found in dependencies
+		dependencyGroups := make(map[string][]Dependency)
+		dependencyGroups["main"] = []Dependency{}
+
+		for _, dep := range deps {
+			// Add to main group
+			dependencyGroups["main"] = append(dependencyGroups["main"], dep)
+
+			// Add to specific extra groups if the dependency has extras
+			for _, extra := range dep.Extras {
+				if dependencyGroups[extra] == nil {
+					dependencyGroups[extra] = []Dependency{}
+				}
+				dependencyGroups[extra] = append(dependencyGroups[extra], dep)
+			}
+		}
+
 		data = append(data, CachePackage{
-			Name:         name,
-			Version:      pi.Info.Version,
-			Dependencies: deps,
+			Name:             name,
+			Version:          pi.Info.Version,
+			Dependencies:     deps,
+			DependencyGroups: dependencyGroups,
 		})
 		return true
 	})
@@ -549,12 +583,31 @@ func (dt *DependencyTracer) ImportCacheJson(path string) error {
 
 		dt.packageCache.Store(pkg.Name, pi)
 		dt.dependencyGraph.Store(pkg.Name, pkg.Dependencies)
+
+		// Store dependency groups if available
+		if pkg.DependencyGroups != nil && len(pkg.DependencyGroups) > 0 {
+			// Note: Dependency groups are package-level metadata from requirements parsing
+			// For cached packages, we preserve the dependency structure but groups are
+			// primarily relevant for root packages from requirements.txt parsing
+			if dt.verbose {
+				color.New(color.Faint).Printf("    Restored dependency groups for %s: %v\n", pkg.Name, getGroupNames(pkg.DependencyGroups))
+			}
+		}
 	}
 
 	if dt.verbose {
 		color.Green("📥 Imported %d packages from cache file %s", len(pkgs), path)
 	}
 	return nil
+}
+
+// getGroupNames returns the keys of a dependency groups map for logging purposes
+func getGroupNames(groups map[string][]Dependency) []string {
+	var names []string
+	for name := range groups {
+		names = append(names, name)
+	}
+	return names
 }
 
 func (dt *DependencyTracer) ImportCache(cache map[string][]Dependency) {

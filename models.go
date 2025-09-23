@@ -1,5 +1,7 @@
 package main
 
+import "strings"
+
 // PyPIPackageInfo represents the structure of PyPI package data
 type PyPIPackageInfo struct {
 	Info struct {
@@ -13,6 +15,13 @@ type PyPIPackageInfo struct {
 type Dependency struct {
 	Name   string   `json:"name"`
 	Extras []string `json:"extras"`
+}
+
+func (dep *Dependency) Stringify() string {
+	if len(dep.Extras) == 0 {
+		return dep.Name
+	}
+	return dep.Name + "[" + strings.Join(dep.Extras, ",") + "]"
 }
 
 // CachePackage represents the minimal info we want to persist
