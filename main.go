@@ -29,7 +29,6 @@ var traceCmd = &cobra.Command{
 		maxConcurrent, _ := cmd.Flags().GetInt64("concurrency")
 		verbose, _ := cmd.Flags().GetBool("verbose")
 		uvLockFile, _ := cmd.Flags().GetString("uv-lock")
-		includeOptional, _ := cmd.Flags().GetBool("include-optional")
 
 		if pattern == "" {
 			return fmt.Errorf("pattern is required")
@@ -54,7 +53,7 @@ var traceCmd = &cobra.Command{
 		}
 		fmt.Println()
 
-		tracer := NewDependencyTracer(maxConcurrent, verbose, includeOptional)
+		tracer := NewDependencyTracer(maxConcurrent, verbose)
 
 		cacheFilePath, err := GetCacheFilePath()
 		if err != nil {
@@ -63,8 +62,9 @@ var traceCmd = &cobra.Command{
 			defer func() {
 				// Export cache to .pypi-tracer.cache file
 				tracer.ExportCacheJson(cacheFilePath)
+				color.Green("✅ Exported %d cached packages to .pypi-tracer.cache", CountSyncMap(&tracer.packageCache))
 			}()
-			
+
 			// If .pypi-tracer.cache exists, importCacheJson from it
 			if _, err := os.Stat(cacheFilePath); err == nil {
 				color.Blue("📂 Loading local cache from .pypi-tracer.cache file")
@@ -93,7 +93,7 @@ var traceCmd = &cobra.Command{
 
 		// Parse requirements.txt
 		color.Blue("📖 Step 1: Parsing requirements file...")
-		rootPackages, err := tracer.ParseRequirements(reqsFile)
+		rootPackages, rootGroups, err := tracer.ParseRequirements(reqsFile)
 		if err != nil {
 			return err
 		}
@@ -103,7 +103,22 @@ var traceCmd = &cobra.Command{
 			return fmt.Errorf("no packages found")
 		}
 
-		color.Green("✅ Found %d root package(s): %s\n", len(rootPackages), strings.Join(rootPackages, ", "))
+		var packageNames []string
+		for _, pkg := range rootPackages {
+			packageNames = append(packageNames, pkg.Name)
+		}
+		color.Green("✅ Found %d root package(s): %s\n", len(rootPackages), strings.Join(packageNames, ", "))
+
+		// Log dependency groups if verbose
+		if verbose && len(rootGroups) > 0 {
+			for group, deps := range rootGroups {
+				var depNames []string
+				for _, dep := range deps {
+					depNames = append(depNames, dep.Name)
+				}
+				color.Blue("   📦 Group '%s': %s", group, strings.Join(depNames, ", "))
+			}
+		}
 
 		// Build dependency graph
 		color.Blue("🔄 Step 2: Building dependency graph...")
@@ -144,7 +159,6 @@ func init() {
 	traceCmd.Flags().Int64P("concurrency", "c", 128, "Maximum concurrent requests")
 	traceCmd.Flags().BoolP("verbose", "v", false, "Enable verbose logging")
 	traceCmd.Flags().String("uv-lock", "", "Path to uv.lock TOML cache file")
-	traceCmd.Flags().Bool("include-optional", false, "Include optional dependencies in the graph")
 
 	rootCmd.AddCommand(traceCmd)
 	// rootCmd.AddCommand(createSampleCmd)

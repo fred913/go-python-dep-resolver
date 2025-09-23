@@ -9,9 +9,16 @@ type PyPIPackageInfo struct {
 	} `json:"info"`
 }
 
+// Dependency represents a dependency with optional extras
+type Dependency struct {
+	Name   string   `json:"name"`
+	Extras []string `json:"extras"`
+}
+
 // CachePackage represents the minimal info we want to persist
 type CachePackage struct {
-	Name         string   `json:"name"`
-	Version      string   `json:"version"`
-	Dependencies []string `json:"dependencies"`
+	Name             string                  `json:"name"`
+	Version          string                  `json:"version"`
+	Dependencies     []Dependency            `json:"dependencies"`
+	DependencyGroups map[string][]Dependency `json:"dependency_groups"`
 }
