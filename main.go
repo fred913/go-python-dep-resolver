@@ -59,17 +59,17 @@ var traceCmd = &cobra.Command{
 			defer func() {
 				// Export cache to .pypi-tracer.cache file
 				tracer.ExportCacheJson(cacheFilePath)
-				color.Green("✅ Exported %d cached packages to .pypi-tracer.cache", CountSyncMap(&tracer.packageCache))
+				// color.Green("✅ Exported %d cached packages to .pypi-tracer.cache", CountSyncMap(&tracer.packageCache))
 			}()
 
 			// If .pypi-tracer.cache exists, importCacheJson from it
 			if _, err := os.Stat(cacheFilePath); err == nil {
-				color.Blue("📂 Loading local cache from .pypi-tracer.cache file")
+				// color.Blue("📂 Loading local cache from .pypi-tracer.cache file")
 				err := tracer.ImportCacheJson(cacheFilePath)
 				if err != nil {
 					color.Yellow("❌ .pypi-tracer.cache exists, but it doesn't seem to be a valid cache file")
 				} else {
-					color.Green("✅ Loaded %d cached packages from .pypi-tracer.cache", CountSyncMap(&tracer.packageCache))
+					// color.Green("✅ Loaded %d cached packages from .pypi-tracer.cache", CountSyncMap(&tracer.packageCache))
 				}
 			}
 		}
